@@ -13,11 +13,34 @@ CHECK_INTERVAL = 3600  # 1 hour
 
 # Global state
 active = True
-bot_instance = None
+
+def load_users():
+    """Load users from file, create file if missing"""
+    if not os.path.exists(USERS_FILE):
+        with open(USERS_FILE, 'w') as f:
+            pass  # Create empty file
+        return set()
+    
+    with open(USERS_FILE, 'r') as f:
+        return set(line.strip() for line in f if line.strip())
+
+def save_user(user_id):
+    """Add a new user to the file if not already present"""
+    users = load_users()
+    user_id = str(user_id)
+    if user_id not in users:
+        with open(USERS_FILE, 'a') as f:
+            f.write(f"{user_id}\n")
+        return True
+    return False
 
 async def send_notification(rate):
-    bot = Bot(token=BOT_TOKEN)
     users = load_users()
+    if not users:
+        print("No users to notify")
+        return
+        
+    bot = Bot(token=BOT_TOKEN)
     message = f"💰 USD Rate: {rate} SYP"
     
     for user_id in users:
@@ -26,12 +49,6 @@ async def send_notification(rate):
             print(f"Sent to {user_id}")
         except Exception as e:
             print(f"Error sending to {user_id}: {e}")
-
-def load_users():
-    if not os.path.exists(USERS_FILE):
-        return []
-    with open(USERS_FILE, "r") as f:
-        return [line.strip() for line in f.readlines() if line.strip()]
 
 def get_usd_rate():
     response = requests.get(URL, headers={"User-Agent": "Mozilla/5.0"})
@@ -54,12 +71,18 @@ async def check_rates_periodically():
 
 # Command Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot started! Use /stop or /reset.")
+    user_id = update.effective_user.id
+    if save_user(user_id):
+        await update.message.reply_text("✅ You've been subscribed to USD rate updates!\n\n"
+                                      "Use /stop to pause notifications\n"
+                                      "Use /reset to resume")
+    else:
+        await update.message.reply_text("ℹ️ You're already subscribed!")
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global active
     active = False
-    await update.message.reply_text("❌ Notifications paused. Use /reset to restart.")
+    await update.message.reply_text("⏸ Notifications paused. Use /reset to restart.")
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global active
@@ -67,16 +90,20 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rate = get_usd_rate()
     if rate:
         await send_notification(rate)
-    await update.message.reply_text("✅ Notifications restarted!")
+    await update.message.reply_text("▶️ Notifications resumed!")
 
 async def post_init(application: Application):
-    global bot_instance
-    bot_instance = application.bot
     asyncio.create_task(check_rates_periodically())
 
 def main():
+    # Initialize users file if missing
+    load_users()
+    
     # Create the Application
-    application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    application = Application.builder() \
+        .token(BOT_TOKEN) \
+        .post_init(post_init) \
+        .build()
 
     # Add command handlers
     application.add_handler(CommandHandler("start", start))
