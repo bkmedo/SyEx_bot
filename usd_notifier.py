@@ -7,7 +7,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 # Configs
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-USERS_FILE = "users.txt"
+USERS_FILE = "/data/users.txt"  # Changed for Railway persistent storage
 URL = "https://sp-today.com/en/currency/us_dollar/city/damascus"
 CHECK_INTERVAL = 3600  # 1 hour
 
@@ -15,24 +15,33 @@ CHECK_INTERVAL = 3600  # 1 hour
 active = True
 
 def load_users():
-    """Load users from file, create file if missing"""
-    if not os.path.exists(USERS_FILE):
-        with open(USERS_FILE, 'w') as f:
-            pass  # Create empty file
+    """Load users from persistent file"""
+    try:
+        os.makedirs(os.path.dirname(USERS_FILE), exist_ok=True)
+        if not os.path.exists(USERS_FILE):
+            with open(USERS_FILE, 'w') as f:
+                pass  # Create empty file
+            return set()
+        
+        with open(USERS_FILE, 'r') as f:
+            return set(line.strip() for line in f if line.strip())
+    except Exception as e:
+        print(f"Error loading users: {e}")
         return set()
-    
-    with open(USERS_FILE, 'r') as f:
-        return set(line.strip() for line in f if line.strip())
 
 def save_user(user_id):
-    """Add a new user to the file if not already present"""
-    users = load_users()
-    user_id = str(user_id)
-    if user_id not in users:
-        with open(USERS_FILE, 'a') as f:
-            f.write(f"{user_id}\n")
-        return True
-    return False
+    """Atomically save user to persistent storage"""
+    try:
+        users = load_users()
+        user_id = str(user_id)
+        if user_id not in users:
+            with open(USERS_FILE, 'a') as f:
+                f.write(f"{user_id}\n")
+            return True
+        return False
+    except Exception as e:
+        print(f"Error saving user: {e}")
+        return False
 
 async def send_notification(rate):
     users = load_users()
@@ -51,13 +60,16 @@ async def send_notification(rate):
             print(f"Error sending to {user_id}: {e}")
 
 def get_usd_rate():
-    response = requests.get(URL, headers={"User-Agent": "Mozilla/5.0"})
-    if response.status_code == 200:
-        soup = BeautifulSoup(response.text, "html.parser")
-        rate_divs = soup.find_all("div", class_="col-xs-2 col-md-1 item-data")
-        for div in rate_divs:
-            if "usd damas" in div.text.lower():
-                return div.find("span", class_="value").text.strip()
+    try:
+        response = requests.get(URL, headers={"User-Agent": "Mozilla/5.0"})
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, "html.parser")
+            rate_divs = soup.find_all("div", class_="col-xs-2 col-md-1 item-data")
+            for div in rate_divs:
+                if "usd damas" in div.text.lower():
+                    return div.find("span", class_="value").text.strip()
+    except Exception as e:
+        print(f"Error getting USD rate: {e}")
     return None
 
 async def check_rates_periodically():
@@ -69,13 +81,10 @@ async def check_rates_periodically():
                 await send_notification(rate)
         await asyncio.sleep(CHECK_INTERVAL)
 
-# Command Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if save_user(user_id):
-        await update.message.reply_text("✅ You've been subscribed to USD rate updates!\n\n"
-                                      "Use /stop to pause notifications\n"
-                                      "Use /reset to resume")
+        await update.message.reply_text("✅ You've been subscribed!")
     else:
         await update.message.reply_text("ℹ️ You're already subscribed!")
 
@@ -92,27 +101,34 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_notification(rate)
     await update.message.reply_text("▶️ Notifications resumed!")
 
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print(f"Error occurred: {context.error}")
+
 async def post_init(application: Application):
+    # Ensure storage directory exists
+    os.makedirs(os.path.dirname(USERS_FILE), exist_ok=True)
     asyncio.create_task(check_rates_periodically())
 
 def main():
-    # Initialize users file if missing
-    load_users()
-    
     # Create the Application
     application = Application.builder() \
         .token(BOT_TOKEN) \
         .post_init(post_init) \
+        .concurrent_updates(True) \
         .build()
 
-    # Add command handlers
+    # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("stop", stop))
     application.add_handler(CommandHandler("reset", reset))
+    application.add_error_handler(error_handler)
 
     # Start polling
     print("Bot is running...")
-    application.run_polling()
+    application.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES
+    )
 
 if __name__ == "__main__":
     main()
