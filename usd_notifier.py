@@ -8,10 +8,11 @@ from telegram import Bot
 BOT_TOKEN = os.getenv("BOT_TOKEN")  # Get from Railway environment
 USERS_FILE = "users.txt"
 URL = "https://sp-today.com/en/currency/us_dollar/city/damascus"
+CHECK_INTERVAL = 3600  # Check every hour (in seconds)
 
-async def send_notification(rate, chat_id=None):
+async def send_notification(rate):
     bot = Bot(token=BOT_TOKEN)
-    users = [chat_id] if chat_id else load_users()
+    users = load_users()
     message = f"💰 USD Rate: {rate} SYP"
     
     for user_id in users:
@@ -37,7 +38,12 @@ def get_usd_rate():
                 return div.find("span", class_="value").text.strip()
     return None
 
+async def main():
+    while True:
+        rate = get_usd_rate()
+        if rate:
+            await send_notification(rate)
+        await asyncio.sleep(CHECK_INTERVAL)  # Wait before next check
+
 if __name__ == "__main__":
-    rate = get_usd_rate()
-    if rate:
-        asyncio.run(send_notification(rate))
+    asyncio.run(main())
