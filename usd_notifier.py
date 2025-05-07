@@ -7,36 +7,40 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 # Configs
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-USERS_FILE = "/data/users.txt"  # Changed for Railway persistent storage
+USERS_FILE = "/data/users.txt"  # Persistent storage path
 URL = "https://sp-today.com/en/currency/us_dollar/city/damascus"
 CHECK_INTERVAL = 3600  # 1 hour
 
 # Global state
 active = True
+users_cache = set()  # In-memory cache of users
 
 def load_users():
-    """Load users from persistent file"""
+    """Load users from file into memory"""
+    global users_cache
     try:
         os.makedirs(os.path.dirname(USERS_FILE), exist_ok=True)
         if not os.path.exists(USERS_FILE):
-            with open(USERS_FILE, 'w') as f:
-                pass  # Create empty file
+            with open(USERS_FILE, 'w'): pass
             return set()
         
         with open(USERS_FILE, 'r') as f:
-            return set(line.strip() for line in f if line.strip())
+            users_cache = set(line.strip() for line in f if line.strip())
+            return users_cache
     except Exception as e:
         print(f"Error loading users: {e}")
         return set()
 
 def save_user(user_id):
-    """Atomically save user to persistent storage"""
+    """Save user to both file and memory cache"""
+    global users_cache
     try:
-        users = load_users()
         user_id = str(user_id)
-        if user_id not in users:
+        if user_id not in users_cache:
             with open(USERS_FILE, 'a') as f:
                 f.write(f"{user_id}\n")
+            users_cache.add(user_id)
+            print(f"New user added: {user_id}")
             return True
         return False
     except Exception as e:
@@ -44,15 +48,14 @@ def save_user(user_id):
         return False
 
 async def send_notification(rate):
-    users = load_users()
-    if not users:
+    if not users_cache:
         print("No users to notify")
         return
         
     bot = Bot(token=BOT_TOKEN)
     message = f"💰 USD Rate: {rate} SYP"
     
-    for user_id in users:
+    for user_id in users_cache:
         try:
             await bot.send_message(chat_id=user_id, text=message)
             print(f"Sent to {user_id}")
@@ -84,7 +87,7 @@ async def check_rates_periodically():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if save_user(user_id):
-        await update.message.reply_text("✅ You've been subscribed!")
+        await update.message.reply_text("✅ You've been subscribed to USD rate updates!")
     else:
         await update.message.reply_text("ℹ️ You're already subscribed!")
 
@@ -105,8 +108,9 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"Error occurred: {context.error}")
 
 async def post_init(application: Application):
-    # Ensure storage directory exists
-    os.makedirs(os.path.dirname(USERS_FILE), exist_ok=True)
+    # Initialize user cache
+    load_users()
+    # Start background tasks
     asyncio.create_task(check_rates_periodically())
 
 def main():
@@ -124,7 +128,7 @@ def main():
     application.add_error_handler(error_handler)
 
     # Start polling
-    print("Bot is running...")
+    print("Bot is running with users:", users_cache)
     application.run_polling(
         drop_pending_updates=True,
         allowed_updates=Update.ALL_TYPES
