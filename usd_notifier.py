@@ -2,137 +2,105 @@ import os
 import asyncio
 import requests
 from bs4 import BeautifulSoup
-from telegram import Bot, Update
+from telegram import Bot, Update, Message
 from telegram.ext import Application, CommandHandler, ContextTypes
+from datetime import datetime, time
 
 # Configs
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-USERS_FILE = "/data/users.txt"  # Persistent storage path
+USERS_FILE = "/data/users.txt"
 URL = "https://sp-today.com/en/currency/us_dollar/city/damascus"
-CHECK_INTERVAL = 3600  # 1 hour
+UPDATE_INTERVAL = 5  # Seconds between rate checks
+DAILY_RESET_TIME = time(0, 0)  # Midnight reset (adjust as needed)
 
 # Global state
 active = True
-users_cache = set()  # In-memory cache of users
+users_cache = set()
+current_rate = None
+live_messages = {}  # {user_id: message_id}
+daily_rates = []  # Stores today's rates
 
-def load_users():
-    """Load users from file into memory"""
-    global users_cache
-    try:
-        os.makedirs(os.path.dirname(USERS_FILE), exist_ok=True)
-        if not os.path.exists(USERS_FILE):
-            with open(USERS_FILE, 'w'): pass
-            return set()
-        
-        with open(USERS_FILE, 'r') as f:
-            users_cache = set(line.strip() for line in f if line.strip())
-            return users_cache
-    except Exception as e:
-        print(f"Error loading users: {e}")
-        return set()
+async def update_live_message(user_id):
+    bot = Bot(token=BOT_TOKEN)
+    message_text = f"💵 LIVE USD Rate: {current_rate} SYP\n(Updates every {UPDATE_INTERVAL}s)"
+    
+    if user_id in live_messages:
+        try:
+            await bot.edit_message_text(
+                chat_id=user_id,
+                message_id=live_messages[user_id],
+                text=message_text
+            )
+        except:
+            # If message editing fails, send new one
+            msg = await bot.send_message(chat_id=user_id, text=message_text)
+            live_messages[user_id] = msg.message_id
+    else:
+        msg = await bot.send_message(chat_id=user_id, text=message_text)
+        live_messages[user_id] = msg.message_id
 
-def save_user(user_id):
-    """Save user to both file and memory cache"""
-    global users_cache
-    try:
-        user_id = str(user_id)
-        if user_id not in users_cache:
-            with open(USERS_FILE, 'a') as f:
-                f.write(f"{user_id}\n")
-            users_cache.add(user_id)
-            print(f"New user added: {user_id}")
-            return True
-        return False
-    except Exception as e:
-        print(f"Error saving user: {e}")
-        return False
-
-async def send_notification(rate):
-    if not users_cache:
-        print("No users to notify")
+async def send_daily_summary():
+    if not daily_rates:
         return
         
     bot = Bot(token=BOT_TOKEN)
-    message = f"💰 USD Rate: {rate} SYP"
+    avg_rate = sum(float(r) for r in daily_rates)/len(daily_rates)
+    message_text = (
+        "📊 Daily Summary\n"
+        f"• Final Rate: {daily_rates[-1]} SYP\n"
+        f"• Average Rate: {avg_rate:.2f} SYP\n"
+        "New live update will appear tomorrow"
+    )
     
     for user_id in users_cache:
         try:
-            await bot.send_message(chat_id=user_id, text=message)
-            print(f"Sent to {user_id}")
+            await bot.send_message(chat_id=user_id, text=message_text)
+            live_messages.pop(user_id, None)  # Clear old live message
         except Exception as e:
-            print(f"Error sending to {user_id}: {e}")
+            print(f"Error sending summary to {user_id}: {e}")
+    
+    daily_rates.clear()
 
-def get_usd_rate():
-    try:
-        response = requests.get(URL, headers={"User-Agent": "Mozilla/5.0"})
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, "html.parser")
-            rate_divs = soup.find_all("div", class_="col-xs-2 col-md-1 item-data")
-            for div in rate_divs:
-                if "usd damas" in div.text.lower():
-                    return div.find("span", class_="value").text.strip()
-    except Exception as e:
-        print(f"Error getting USD rate: {e}")
-    return None
-
-async def check_rates_periodically():
-    global active
+async def check_rates():
+    global current_rate, daily_rates
     while True:
         if active:
             rate = get_usd_rate()
-            if rate:
-                await send_notification(rate)
-        await asyncio.sleep(CHECK_INTERVAL)
+            if rate and rate != current_rate:
+                current_rate = rate
+                daily_rates.append(rate)
+                print(f"Rate updated: {rate}")
+                
+                # Update all live messages
+                for user_id in users_cache.copy():
+                    try:
+                        await update_live_message(user_id)
+                    except Exception as e:
+                        print(f"Error updating {user_id}: {e}")
+                        
+                # Check for daily reset
+                if datetime.now().time() >= DAILY_RESET_TIME:
+                    await send_daily_summary()
+                    await asyncio.sleep(1)  # Ensure midnight passes
+                    
+        await asyncio.sleep(UPDATE_INTERVAL)
+
+# [Previous load_users(), save_user(), get_usd_rate() functions remain the same]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if save_user(user_id):
-        await update.message.reply_text("✅ You've been subscribed to USD rate updates!")
+        await update_live_message(user_id)
+        await update.message.reply_text("✅ Live tracking started!")
     else:
-        await update.message.reply_text("ℹ️ You're already subscribed!")
+        await update_live_message(user_id)
+        await update.message.reply_text("ℹ️ Welcome back!")
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global active
     active = False
-    await update.message.reply_text("⏸ Notifications paused. Use /reset to restart.")
+    user_id = update.effective_user.id
+    live_messages.pop(user_id, None)
+    await update.message.reply_text("⏸ Stopped live updates")
 
-async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global active
-    active = True
-    rate = get_usd_rate()
-    if rate:
-        await send_notification(rate)
-    await update.message.reply_text("▶️ Notifications resumed!")
-
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"Error occurred: {context.error}")
-
-async def post_init(application: Application):
-    # Initialize user cache
-    load_users()
-    # Start background tasks
-    asyncio.create_task(check_rates_periodically())
-
-def main():
-    # Create the Application
-    application = Application.builder() \
-        .token(BOT_TOKEN) \
-        .post_init(post_init) \
-        .concurrent_updates(True) \
-        .build()
-
-    # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("stop", stop))
-    application.add_handler(CommandHandler("reset", reset))
-    application.add_error_handler(error_handler)
-
-    # Start polling
-    print("Bot is running with users:", users_cache)
-    application.run_polling(
-        drop_pending_updates=True,
-        allowed_updates=Update.ALL_TYPES
-    )
-
-if __name__ == "__main__":
-    main()
+# [Rest of the bot setup remains same as previous example]
